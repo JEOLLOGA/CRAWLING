@@ -1,6 +1,1 @@
-db_config
-*.db_config
-C:/jeolloga-crawling/data/db_config.yaml
-C://eolloga-crawling//data//db_config.yaml
-C:\jeolloga-crawling\data\db_config.yaml
-C:\\jeolloga-crawling\\data\\db_config.yaml
+data/db_config.yaml
