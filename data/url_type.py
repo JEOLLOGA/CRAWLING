@@ -76,12 +76,23 @@ def batch_insert_and_upsert(conn, url_type_list):
     cursor = conn.cursor(dictionary=True)
 
     try:
-        url_params = [(url,) for url, _, _ in url_type_list]
+        valid_url_type_list = [(url, type_bits, program_id) for url, type_bits, program_id in url_type_list if type_bits > 0]
+        if not valid_url_type_list:
+            return
+
+        url_params = [(url,) for url, _, _ in valid_url_type_list]
         cursor.executemany("INSERT IGNORE INTO templestay (url) VALUES (%s)", url_params)
 
-        url_to_type = {url: type_bits for url, type_bits, _ in url_type_list}
-        cursor.execute("SELECT id, url FROM templestay WHERE url IN %s", (tuple(url_to_type.keys()),))
-        rows = cursor.fetchall()
+        url_to_type = {url: type_bits for url, type_bits, _ in valid_url_type_list}
+        url_keys_tuple = tuple(url_to_type.keys())
+
+        if url_keys_tuple:
+            placeholders = ','.join(['%s'] * len(url_keys_tuple))
+            query = f"SELECT id, url FROM templestay WHERE url IN ({placeholders})"
+            cursor.execute(query, url_keys_tuple)
+            rows = cursor.fetchall()
+        else:
+            rows = []
 
         filter_data = [(row["id"], url_to_type[row["url"]]) for row in rows]
         cursor.executemany("""

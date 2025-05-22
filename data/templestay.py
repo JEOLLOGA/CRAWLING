@@ -90,6 +90,33 @@ def extract_phone_number(phone_text):
         phone = phone.split('/')[-1].strip()
     return phone
 
+def extract_image_urls(soup):
+    """이미지 URL들을 추출하는 함수"""
+    image_urls = []
+    
+    # swiper-slide 내의 이미지들 추출
+    swiper_slides = soup.find_all('div', class_='swiper-slide')
+    for slide in swiper_slides:
+        img = slide.find('img')
+        if img and img.get('src'):
+            src = img.get('src')
+            # 상대 경로를 절대 경로로 변환
+            if src.startswith('/'):
+                src = 'https://www.templestay.com' + src
+            image_urls.append(src)
+    
+    # 다른 이미지 섹션들도 확인 (프로그램 소개 등)
+    img_tags = soup.find_all('img')
+    for img in img_tags:
+        src = img.get('src')
+        if src and 'templePrg' in src:  # templestay 관련 이미지만
+            if src.startswith('/'):
+                src = 'https://www.templestay.com' + src
+            if src not in image_urls:  # 중복 제거
+                image_urls.append(src)
+    
+    return image_urls
+
 def parse_program_schedule(html): 
     soup = BeautifulSoup(html, 'html.parser')
     table = soup.find('table')
@@ -165,7 +192,7 @@ def crawl_templestay_details(url, driver=None):
         place_div = soup.find('div', class_='place')
         if not place_div:
             logger.warning(f"place div 없음: {url}")
-            return (None, None, None, None, None, None)
+            return (None, None, None, None, None, None, [])
 
         templestay_name = place_div.find('h3').get_text(strip=True) if place_div.find('h3') else None
 
@@ -205,13 +232,16 @@ def crawl_templestay_details(url, driver=None):
                         schedule_json = parse_program_schedule(str(table))
                 break
 
-        logger.info(f"크롤링 완료: {templestay_name} ({temple_name})")
+        # 이미지 URL 추출
+        image_urls = extract_image_urls(soup)
 
-        return (templestay_name, temple_name, address, phone, introduction, schedule_json)
+        logger.info(f"크롤링 완료: {templestay_name} ({temple_name}), 이미지 {len(image_urls)}개")
+
+        return (templestay_name, temple_name, address, phone, introduction, schedule_json, image_urls)
 
     except Exception as e:
         logger.error(f"크롤링 실패 ({url}): {e}")
-        return (None, None, None, None, None, None)
+        return (None, None, None, None, None, None, [])
     finally:
         if close_driver:
             driver.quit()
@@ -262,13 +292,42 @@ def update_templestay_batch(batch_data):
 
     return success_count
 
+def insert_images_batch(image_data):
+    """이미지 데이터를 배치로 삽입하는 함수"""
+    if not image_data:
+        return 0
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    success_count = 0
+
+    try:
+        query = """
+            INSERT INTO image (templestay_id, img_url, created_at) 
+            VALUES (%s, %s, NOW())
+        """
+        cursor.executemany(query, image_data)
+        conn.commit()
+        success_count = cursor.rowcount
+        logger.info(f"이미지 배치 삽입 완료: {success_count}건")
+
+    except Exception as e:
+        logger.error(f"이미지 배치 삽입 실패: {e}")
+        conn.rollback()
+    finally:
+        cursor.close()
+        conn.close()
+
+    return success_count
+
 def process_url_batch(urls_batch):
     driver = create_driver()
     batch_data = []
+    image_data = []
     
     try:
         for templestay_id, url in urls_batch:
-            templestay_name, temple_name, address, phone, introduction, schedule = crawl_templestay_details(url, driver)
+            templestay_name, temple_name, address, phone, introduction, schedule, image_urls = crawl_templestay_details(url, driver)
             
             if templestay_name or temple_name or address or phone or introduction or schedule:
                 batch_data.append((
@@ -280,11 +339,16 @@ def process_url_batch(urls_batch):
                     schedule,
                     templestay_id
                 ))
+            
+            # 이미지 URL이 있으면 이미지 데이터에 추가
+            for img_url in image_urls:
+                image_data.append((templestay_id, img_url))
+            
             time.sleep(0.2)
     finally:
         driver.quit()
     
-    return batch_data
+    return batch_data, image_data
 
 def main(batch_size=20, max_workers=3):
     try:
@@ -297,19 +361,23 @@ def main(batch_size=20, max_workers=3):
         logger.info(f"전체 처리 대상: {len(url_data)}개")
 
         successful_updates = 0
+        successful_images = 0
         batches = [url_data[i:i+batch_size] for i in range(0, len(url_data), batch_size)]
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_batch = {executor.submit(process_url_batch, batch): batch for batch in batches}
             all_batch_data = []
+            all_image_data = []
 
             for future in as_completed(future_to_batch):
                 try:
-                    batch_data = future.result()
+                    batch_data, image_data = future.result()
                     all_batch_data.extend(batch_data)
+                    all_image_data.extend(image_data)
                 except Exception as e:
                     logger.error(f"배치 처리 중 오류 발생: {e}")
 
+            # templestay 데이터 업데이트
             if all_batch_data:
                 bulk_batch_size = 100
                 for i in range(0, len(all_batch_data), bulk_batch_size):
@@ -317,7 +385,15 @@ def main(batch_size=20, max_workers=3):
                     success_count = update_templestay_batch(bulk_batch)
                     successful_updates += success_count
 
-        logger.info(f"작업 완료: 총 {successful_updates}건 업데이트 성공")
+            # 이미지 데이터 삽입
+            if all_image_data:
+                bulk_batch_size = 200  # 이미지는 더 많은 수로 배치 처리
+                for i in range(0, len(all_image_data), bulk_batch_size):
+                    bulk_batch = all_image_data[i:i + bulk_batch_size]
+                    success_count = insert_images_batch(bulk_batch)
+                    successful_images += success_count
+
+        logger.info(f"작업 완료: templestay {successful_updates}건, 이미지 {successful_images}건 처리 성공")
 
     except Exception as e:
         logger.error(f"프로그램 실행 중 오류 발생: {e}")
