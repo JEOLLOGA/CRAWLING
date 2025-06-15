@@ -105,14 +105,13 @@ def extract_image_urls(soup):
                 src = 'https://www.templestay.com' + src
             image_urls.append(src)
     
-    # 다른 이미지 섹션들도 확인 (프로그램 소개 등)
     img_tags = soup.find_all('img')
     for img in img_tags:
         src = img.get('src')
-        if src and 'templePrg' in src:  # templestay 관련 이미지만
+        if src and 'templePrg' in src:
             if src.startswith('/'):
                 src = 'https://www.templestay.com' + src
-            if src not in image_urls:  # 중복 제거
+            if src not in image_urls:
                 image_urls.append(src)
     
     return image_urls
@@ -401,4 +400,4 @@ def main(batch_size=20, max_workers=3):
         logger.error(f"상세 오류 내용: {traceback.format_exc()}")
 
 if __name__ == "__main__":
-    main(batch_size=20, max_workers=3)
+    main(batch_size=10, max_workers=1)
